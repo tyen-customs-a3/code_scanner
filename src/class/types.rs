@@ -59,6 +59,9 @@ pub struct ClassScanOptions {
     
     /// Number of parallel threads to use for scanning
     pub parallel_threads: Option<usize>,
+    
+    /// Whether to use the optimized parser from cpp_parser
+    pub use_optimized_parser: bool,
 }
 
 impl Default for ClassScanOptions {
@@ -68,6 +71,7 @@ impl Default for ClassScanOptions {
             max_files: None,
             parse_timeout_seconds: 10,
             parallel_threads: None,
+            use_optimized_parser: true,
         }
     }
 }

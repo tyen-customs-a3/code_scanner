@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use once_cell::sync::Lazy;
 
 use crate::class::types::ClassScanOptions;
-use cpp_parser::Class;
+use cpp_parser::Block;
 
 // Re-export from submodules
 pub use file_collector::FileCollector;
@@ -65,17 +65,17 @@ impl ClassScanner {
     }
     
     /// Parse a single file and return the classes found in it
-    pub fn parse_file(&self, file: impl AsRef<Path>) -> Result<Vec<Class>> {
+    pub fn parse_file(&self, file: impl AsRef<Path>) -> Result<Vec<Block>> {
         self.parser.parse_file(file)
     }
     
     /// Parse a single file with a timeout and return the classes found in it
-    pub fn parse_file_with_timeout(&self, file: impl AsRef<Path>) -> Result<(Vec<Class>, bool)> {
+    pub fn parse_file_with_timeout(&self, file: impl AsRef<Path>) -> Result<(Vec<Block>, bool)> {
         self.parser.parse_file_with_timeout(file, self.options.parse_timeout_seconds)
     }
     
     /// Scan files in parallel and return the classes found in each file
-    pub fn scan_files_parallel(&self, files: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<Class>)>> {
+    pub fn scan_files_parallel(&self, files: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<Block>)>> {
         // Clear the error and timeout files
         if let Ok(mut error_files) = ERROR_FILES.lock() {
             error_files.clear();

@@ -25,7 +25,7 @@ impl ClassProcessor {
     /// Create a new class processor with the given options and output directory
     pub fn new(options: ClassScanOptions, output_dir: impl AsRef<Path>) -> Self {
         Self {
-            options: options.clone(),
+            options,
             output_dir: output_dir.as_ref().to_path_buf(),
             property_processor: PropertyProcessor::new(),
         }
@@ -87,7 +87,7 @@ impl ClassProcessor {
     /// Collect pre-scanned classes from files without processing
     pub fn collect_scanned_classes(
         &self,
-        scanned_files: Vec<(PathBuf, Vec<cpp_parser::Class>)>,
+        scanned_files: Vec<(PathBuf, Vec<cpp_parser::Block>)>,
     ) -> Result<(Vec<ProcessedClass>, ClassScanStats)> {
         let mut final_collected_classes = Vec::with_capacity(scanned_files.len() * 5); // Pre-allocate with estimated capacity
         let mut final_stats = ClassScanStats::default();
@@ -134,14 +134,28 @@ impl ClassProcessor {
     }
     
     /// Collect classes from a file without processing
-    fn collect_classes(&self, classes: &[cpp_parser::Class], file_path: &Path, collected_classes: &mut Vec<ProcessedClass>) {
+    fn collect_classes(&self, classes: &[cpp_parser::Block], file_path: &Path, collected_classes: &mut Vec<ProcessedClass>) {
         for class in classes {
             debug!("Collecting class: {:?} from {}", class.name, file_path.display());
             
             // Only collect top-level classes with names
             if let Some(name) = &class.name {
-                // Store raw properties without processing
-                let properties = self.property_processor.collect_properties(&class.properties);
+                // Get the raw content of the class
+                let class_content = class.content.as_str();
+                
+                // Parse properties from the class content
+                let properties_result = cpp_parser::property_parser::parse_properties(class_content);
+                
+                let properties = match properties_result {
+                    Ok(props) => {
+                        // Use the new method to collect properties from the list
+                        self.property_processor.collect_properties_from_list(&props)
+                    },
+                    Err(err) => {
+                        warn!("Failed to parse properties for class {}: {}", name, err);
+                        Vec::new()
+                    }
+                };
                 
                 // Create processed class without evaluating hierarchy
                 let processed_class = ProcessedClass {
@@ -156,26 +170,41 @@ impl ClassProcessor {
                 debug!("Skipping unnamed class in {}", file_path.display());
             }
             
-            // Collect nested classes as separate top-level entries
-            for (_, value) in &class.properties {
-                if let cpp_parser::Value::Class(nested_class) = value {
-                    if let Some(nested_name) = &nested_class.name {
-                        debug!("Collecting nested class: {} in {}", nested_name, file_path.display());
-                        
-                        // Store raw properties without processing
-                        let properties = self.property_processor.collect_properties(&nested_class.properties);
-                        
-                        // Create processed class for nested class without evaluating hierarchy
-                        let processed_class = ProcessedClass {
-                            name: nested_name.clone(),
-                            parent: nested_class.parent.clone(), // Just store the parent name without evaluating
-                            properties,
-                            file_path: Some(file_path.to_path_buf()),
-                        };
-                        
-                        collected_classes.push(processed_class);
-                    }
+            // Collect nested classes from children
+            for child in &class.children {
+                if let Some(nested_name) = &child.name {
+                    debug!("Collecting nested class: {} in {}", nested_name, file_path.display());
+                    
+                    // Get the raw content of the nested class
+                    let nested_content = child.content.as_str();
+                    
+                    // Parse properties from the nested class content
+                    let properties_result = cpp_parser::property_parser::parse_properties(nested_content);
+                    
+                    let properties = match properties_result {
+                        Ok(props) => {
+                            // Use the new method to collect properties from the list
+                            self.property_processor.collect_properties_from_list(&props)
+                        },
+                        Err(err) => {
+                            warn!("Failed to parse properties for nested class {}: {}", nested_name, err);
+                            Vec::new()
+                        }
+                    };
+                    
+                    // Create processed class for nested class without evaluating hierarchy
+                    let processed_class = ProcessedClass {
+                        name: nested_name.clone(),
+                        parent: child.parent.clone(),
+                        properties,
+                        file_path: Some(file_path.to_path_buf()),
+                    };
+                    
+                    collected_classes.push(processed_class);
                 }
+                
+                // Recursively collect nested classes from this child
+                self.collect_classes(&[child.clone()], file_path, collected_classes);
             }
         }
     }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use cpp_parser::Value;
+use cpp_parser::models::{Property, PropertyValue};
 use log::trace;
 
 /// Property processor for processing class properties
@@ -12,45 +12,36 @@ impl PropertyProcessor {
         Self {}
     }
     
-    /// Collect properties from a class without processing them
-    pub fn collect_properties(&self, properties: &HashMap<String, Value>) -> Vec<(String, String)> {
+    /// Collect properties from a list of properties without processing them
+    pub fn collect_properties_from_list(&self, properties: &[Property]) -> Vec<(String, String)> {
         // Pre-allocate properties vector with estimated capacity
         let mut collected_properties = Vec::with_capacity(properties.len());
         
         // Collect properties without complex processing
-        for (key, value) in properties {
+        for property in properties {
+            let key = &property.name;
+            let value = &property.value;
+            
             match value {
-                Value::String(s) => {
+                PropertyValue::String(s) => {
                     trace!("Collecting string property: {} = {}", key, s);
                     collected_properties.push((key.clone(), s.clone()));
                 }
-                Value::Number(n) => {
+                PropertyValue::Number(n) => {
                     trace!("Collecting number property: {} = {}", key, n);
                     collected_properties.push((key.clone(), n.to_string()));
                 }
-                Value::Integer(i) => {
-                    trace!("Collecting integer property: {} = {}", key, i);
-                    collected_properties.push((key.clone(), i.to_string()));
+                PropertyValue::Boolean(b) => {
+                    trace!("Collecting boolean property: {} = {}", key, b);
+                    collected_properties.push((key.clone(), b.to_string()));
                 }
-                Value::Array(_) => {
+                PropertyValue::Array(_) => {
                     trace!("Collecting array property: {}", key);
                     collected_properties.push((key.clone(), "[array]".to_string()));
                 }
-                Value::Expression(expr) => {
-                    trace!("Collecting expression property: {} = {}", key, expr);
-                    collected_properties.push((key.clone(), expr.clone()));
-                }
-                Value::Reference(ref_name) => {
+                PropertyValue::Reference(ref_name) => {
                     trace!("Collecting reference property: {} = {}", key, ref_name);
                     collected_properties.push((key.clone(), ref_name.clone()));
-                }
-                Value::ListMacro(count, name) => {
-                    trace!("Collecting list macro property: {} = {}:{}", key, count, name);
-                    collected_properties.push((key.clone(), format!("{}:{}", count, name)));
-                }
-                Value::Class(_) => {
-                    // Skip nested classes, they're collected separately
-                    trace!("Skipping nested class property: {}", key);
                 }
             }
         }
@@ -58,23 +49,60 @@ impl PropertyProcessor {
         collected_properties
     }
     
-    /// Process properties from a class
-    pub fn process_properties(&self, properties: &HashMap<String, Value>) -> Vec<(String, String)> {
+    /// Backward compatibility method for old HashMap<String, Value> interface
+    pub fn collect_properties(&self, properties: &HashMap<String, PropertyValue>) -> Vec<(String, String)> {
+        // Pre-allocate properties vector with estimated capacity
+        let mut collected_properties = Vec::with_capacity(properties.len());
+        
+        // Collect properties without complex processing
+        for (key, value) in properties {
+            match value {
+                PropertyValue::String(s) => {
+                    trace!("Collecting string property: {} = {}", key, s);
+                    collected_properties.push((key.clone(), s.clone()));
+                }
+                PropertyValue::Number(n) => {
+                    trace!("Collecting number property: {} = {}", key, n);
+                    collected_properties.push((key.clone(), n.to_string()));
+                }
+                PropertyValue::Boolean(b) => {
+                    trace!("Collecting boolean property: {} = {}", key, b);
+                    collected_properties.push((key.clone(), b.to_string()));
+                }
+                PropertyValue::Array(_) => {
+                    trace!("Collecting array property: {}", key);
+                    collected_properties.push((key.clone(), "[array]".to_string()));
+                }
+                PropertyValue::Reference(ref_name) => {
+                    trace!("Collecting reference property: {} = {}", key, ref_name);
+                    collected_properties.push((key.clone(), ref_name.clone()));
+                }
+            }
+        }
+        
+        collected_properties
+    }
+    
+    /// Process properties from a list of properties
+    pub fn process_properties_from_list(&self, properties: &[Property]) -> Vec<(String, String)> {
         // Pre-allocate properties vector with estimated capacity
         let mut processed_properties = Vec::with_capacity(properties.len());
         
         // Process properties
-        for (key, value) in properties {
+        for property in properties {
+            let key = &property.name;
+            let value = &property.value;
+            
             match value {
-                Value::String(s) => {
+                PropertyValue::String(s) => {
                     trace!("Processing string property: {} = {}", key, s);
                     processed_properties.push((key.clone(), s.clone()));
                 }
-                Value::Number(n) => {
+                PropertyValue::Number(n) => {
                     trace!("Processing number property: {} = {}", key, n);
                     processed_properties.push((key.clone(), n.to_string()));
                 }
-                Value::Array(arr) => {
+                PropertyValue::Array(arr) => {
                     trace!("Processing array property: {} with {} elements", key, arr.len());
                     // Convert array to string representation
                     let arr_str = arr.iter()
@@ -83,25 +111,52 @@ impl PropertyProcessor {
                         .join(", ");
                     processed_properties.push((key.clone(), format!("[{}]", arr_str)));
                 }
-                Value::Class(_) => {
-                    // Nested classes are processed separately
-                    trace!("Skipping nested class property: {}", key);
+                PropertyValue::Boolean(b) => {
+                    trace!("Processing boolean property: {} = {}", key, b);
+                    processed_properties.push((key.clone(), b.to_string()));
                 }
-                Value::Integer(i) => {
-                    trace!("Processing integer property: {} = {}", key, i);
-                    processed_properties.push((key.clone(), i.to_string()));
-                }
-                Value::Expression(expr) => {
-                    trace!("Processing expression property: {} = {}", key, expr);
-                    processed_properties.push((key.clone(), format!("expr:{}", expr)));
-                }
-                Value::Reference(ref_name) => {
+                PropertyValue::Reference(ref_name) => {
                     trace!("Processing reference property: {} = {}", key, ref_name);
                     processed_properties.push((key.clone(), format!("ref:{}", ref_name)));
                 }
-                Value::ListMacro(count, name) => {
-                    trace!("Processing list macro property: {} = {}:{}", key, count, name);
-                    processed_properties.push((key.clone(), format!("macro:{}:{}", count, name)));
+            }
+        }
+        
+        processed_properties
+    }
+    
+    /// Backward compatibility method for old HashMap<String, Value> interface
+    pub fn process_properties(&self, properties: &HashMap<String, PropertyValue>) -> Vec<(String, String)> {
+        // Pre-allocate properties vector with estimated capacity
+        let mut processed_properties = Vec::with_capacity(properties.len());
+        
+        // Process properties
+        for (key, value) in properties {
+            match value {
+                PropertyValue::String(s) => {
+                    trace!("Processing string property: {} = {}", key, s);
+                    processed_properties.push((key.clone(), s.clone()));
+                }
+                PropertyValue::Number(n) => {
+                    trace!("Processing number property: {} = {}", key, n);
+                    processed_properties.push((key.clone(), n.to_string()));
+                }
+                PropertyValue::Array(arr) => {
+                    trace!("Processing array property: {} with {} elements", key, arr.len());
+                    // Convert array to string representation
+                    let arr_str = arr.iter()
+                        .map(|v| self.value_to_string(v))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    processed_properties.push((key.clone(), format!("[{}]", arr_str)));
+                }
+                PropertyValue::Boolean(b) => {
+                    trace!("Processing boolean property: {} = {}", key, b);
+                    processed_properties.push((key.clone(), b.to_string()));
+                }
+                PropertyValue::Reference(ref_name) => {
+                    trace!("Processing reference property: {} = {}", key, ref_name);
+                    processed_properties.push((key.clone(), format!("ref:{}", ref_name)));
                 }
             }
         }
@@ -110,42 +165,36 @@ impl PropertyProcessor {
     }
     
     /// Convert a value to a string representation
-    fn value_to_string(&self, value: &Value) -> String {
+    fn value_to_string(&self, value: &PropertyValue) -> String {
         match value {
-            Value::String(s) => format!("\"{}\"", s),
-            Value::Number(n) => n.to_string(),
-            Value::Array(arr) => {
+            PropertyValue::String(s) => format!("\"{}\"", s),
+            PropertyValue::Number(n) => n.to_string(),
+            PropertyValue::Array(arr) => {
                 let arr_str = arr.iter()
                     .map(|v| self.value_to_string(v))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("[{}]", arr_str)
             }
-            Value::Class(_) => "class".to_string(),
-            Value::Integer(i) => i.to_string(),
-            Value::Expression(expr) => format!("expr:{}", expr),
-            Value::Reference(ref_name) => format!("ref:{}", ref_name),
-            Value::ListMacro(count, name) => format!("macro:{}:{}", count, name),
+            PropertyValue::Boolean(b) => b.to_string(),
+            PropertyValue::Reference(ref_name) => format!("ref:{}", ref_name),
         }
     }
     
     /// Get the type of a value as a string
-    pub fn get_value_type(&self, value: &Value) -> String {
+    pub fn get_value_type(&self, value: &PropertyValue) -> String {
         match value {
-            Value::String(_) => "string".to_string(),
-            Value::Number(_) => "number".to_string(),
-            Value::Array(arr) => {
+            PropertyValue::String(_) => "string".to_string(),
+            PropertyValue::Number(_) => "number".to_string(),
+            PropertyValue::Array(arr) => {
                 if arr.is_empty() {
                     "array".to_string()
                 } else {
                     format!("array<{}>", self.get_value_type(&arr[0]))
                 }
             },
-            Value::Class(_) => "class".to_string(),
-            Value::Integer(_) => "integer".to_string(),
-            Value::Expression(_) => "expression".to_string(),
-            Value::Reference(_) => "reference".to_string(),
-            Value::ListMacro(_, _) => "macro".to_string(),
+            PropertyValue::Boolean(_) => "boolean".to_string(),
+            PropertyValue::Reference(_) => "reference".to_string(),
         }
     }
 } 

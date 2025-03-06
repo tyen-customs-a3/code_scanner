@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::io::Write;
 
 use anyhow::{Result, Context, anyhow};
-use cpp_parser::{Class, parse_cpp};
+use cpp_parser::Block;
 use log::{debug, warn, error, trace};
 
 use crate::class::types::ClassScanOptions;
@@ -31,61 +31,30 @@ impl ClassParser {
         }
     }
     
-    /// Parse a single file and return the classes found in it
-    pub fn parse_file(&self, file: impl AsRef<Path>) -> Result<Vec<Class>> {
-        let file = file.as_ref();
-        debug!("Processing file: {}", file.display());
+    /// Parse a file and return the parsed classes
+    pub fn parse_file(&self, file: impl AsRef<Path>) -> Result<Vec<Block>> {
+        let file_path = file.as_ref();
+        debug!("Parsing file: {}", file_path.display());
         
-        // Read the file content
-        let content = fs::read_to_string(file)
-            .with_context(|| format!("Failed to read file {}", file.display()))?;
+        // Read file content
+        let content = fs::read_to_string(file_path)
+            .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
         
-        if content.trim().is_empty() {
-            warn!("Empty file found: {}", file.display());
-            return Ok(Vec::new());
-        }
+        // Use optimized parser if enabled in options
+        let classes = if self.options.use_optimized_parser {
+            debug!("Using optimized parallel parser for {}", file_path.display());
+            cpp_parser::optimized::parse_classes_parallel(&content)
+        } else {
+            debug!("Using standard parser for {}", file_path.display());
+            cpp_parser::parse_classes(&content)
+        };
         
-        trace!("File size: {} bytes, starting parse", content.len());
-        
-        // Parse the content
-        match parse_cpp(&content) {
-            Ok(classes) => {
-                if classes.is_empty() {
-                    debug!("No classes found in file: {}", file.display());
-                } else {
-                    debug!("Found {} classes in {}", classes.len(), file.display());
-                    
-                    // Only generate class names list for trace level logging
-                    if log::log_enabled!(log::Level::Trace) {
-                        let class_names = classes.iter()
-                            .map(|c| c.name.clone().unwrap_or_else(|| "UnnamedClass".to_string()))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        trace!("Class names: {}", class_names);
-                    }
-                }
-                Ok(classes)
-            }
-            Err(e) => {
-                // Log detailed error information
-                let err = anyhow!("Failed to parse file {}: {}", file.display(), e);
-                error!("{}", err);
-                
-                // Try to extract a snippet of the problematic content and log to file
-                if self.options.verbose_errors {
-                    self.log_parse_error(file, &e, &content);
-                }
-                
-                // Add to error files
-                ClassScanner::add_error_file(file);
-                
-                Err(err)
-            }
-        }
+        debug!("Found {} classes in {}", classes.len(), file_path.display());
+        Ok(classes)
     }
     
     /// Parse a single file with a timeout and return the classes found in it
-    pub fn parse_file_with_timeout(&self, file: impl AsRef<Path>, timeout_seconds: u64) -> Result<(Vec<Class>, bool)> {
+    pub fn parse_file_with_timeout(&self, file: impl AsRef<Path>, timeout_seconds: u64) -> Result<(Vec<Block>, bool)> {
         let file = file.as_ref();
         debug!("Processing file with timeout: {}", file.display());
         
@@ -94,6 +63,7 @@ impl ClassParser {
         let file_path = file.to_path_buf();
         let output_dir = self.output_dir.clone();
         let verbose_errors = self.options.verbose_errors;
+        let use_optimized_parser = self.options.use_optimized_parser;
         
         // Spawn a thread to parse the file
         let parse_thread = thread::spawn(move || {
@@ -101,6 +71,7 @@ impl ClassParser {
             let parser = ClassParser::new(
                 ClassScanOptions {
                     verbose_errors,
+                    use_optimized_parser,
                     ..ClassScanOptions::default()
                 },
                 output_dir
