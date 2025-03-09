@@ -17,6 +17,16 @@ pub struct ProcessedClass {
     pub file_path: Option<PathBuf>,
 }
 
+/// Errors encountered during the scanning process
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ScanErrors {
+    /// Paths to files that failed to parse
+    pub error_files: Vec<PathBuf>,
+    
+    /// Paths to files that timed out during parsing
+    pub timeout_files: Vec<PathBuf>,
+}
+
 /// Statistics about the class scanning process
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ClassScanStats {

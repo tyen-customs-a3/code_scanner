@@ -1,13 +1,12 @@
 use std::path::Path;
-use std::fs;
 use std::collections::HashSet;
 use anyhow::Result;
 use log::{info, warn};
 use chrono::Utc;
-use sha2::{Sha256, Digest};
 use serde_json;
 
 use crate::class::types::ClassScanResult;
+use crate::utils::{file_utils, hash_utils};
 use super::types::{ClassDatabase, ClassDatabaseStats, ClassEntry};
 use super::storage::DatabaseStorage;
 
@@ -93,15 +92,8 @@ impl DatabaseOperations {
                 let path_str = file_path.to_string_lossy().to_string();
                 processed_files.insert(path_str.clone());
                 
-                // Calculate file hash
-                let file_hash = if let Ok(content) = std::fs::read_to_string(file_path) {
-                    let mut hasher = Sha256::new();
-                    hasher.update(content.as_bytes());
-                    format!("{:x}", hasher.finalize())
-                } else {
-                    // If we can't read the file, use a placeholder hash
-                    "unknown".to_string()
-                };
+                // Calculate file hash using hash_utils
+                let file_hash = hash_utils::hash_file(file_path).unwrap_or_else(|_| "unknown".to_string());
                 
                 // Update file_classes map
                 let class_names = self.db.file_classes.entry(path_str).or_insert_with(Vec::new);

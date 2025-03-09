@@ -16,3 +16,6 @@ pub use database::{
 
 // Re-export utility functions
 pub use utils::file_utils; 
+
+#[cfg(test)]
+mod tests;

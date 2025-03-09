@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use anyhow::Result;
 use log::{debug, trace};
-use walkdir::WalkDir;
+
+use crate::utils::file_utils;
 
 /// File collector for finding class files
 #[derive(Debug, Default)]
@@ -30,24 +31,13 @@ impl FileCollector {
         let input_dir = input_dir.as_ref();
         debug!("Collecting files from directory: {}", input_dir.display());
         
-        // Use a more efficient approach with pre-allocation
-        let mut files = Vec::with_capacity(1000); // Pre-allocate with a reasonable capacity
+        // Convert extensions to str slices for file_utils
+        let extensions: Vec<&str> = self.valid_extensions.iter()
+            .map(|s| s.as_str())
+            .collect();
         
-        for entry in WalkDir::new(input_dir)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            if let Some(ext) = entry.path().extension() {
-                if let Some(ext_str) = ext.to_str() {
-                    if self.valid_extensions.iter().any(|valid_ext| ext_str.eq_ignore_ascii_case(valid_ext)) {
-                        trace!("Found file: {}", entry.path().display());
-                        files.push(entry.path().to_owned());
-                    }
-                }
-            }
-        }
+        // Use file_utils for consistent file collection
+        let files = file_utils::get_files_with_extensions(input_dir, &extensions)?;
         
         debug!("Collected {} files for processing", files.len());
         Ok(files)

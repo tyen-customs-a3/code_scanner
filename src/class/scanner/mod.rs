@@ -1,27 +1,24 @@
 mod file_collector;
 mod parser;
 mod progress;
+pub mod simple_parser;
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use anyhow::{Result, Context};
-use log::{debug, warn};
 use std::collections::HashSet;
-use once_cell::sync::Lazy;
 
-use crate::class::types::ClassScanOptions;
-use cpp_parser::Block;
+use anyhow::{Result, Context};
+use log::{debug, warn, info};
+use rayon::prelude::*;
+
+use crate::class::types::{ClassScanOptions, ScanErrors};
 
 // Re-export from submodules
 pub use file_collector::FileCollector;
 pub use parser::ClassParser;
 pub use progress::ProgressTracker;
+pub use simple_parser::{SimpleParser, ClassBlock, Block};
 
-// Thread-safe storage for error and timeout files
-static ERROR_FILES: Lazy<Mutex<HashSet<PathBuf>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-static TIMEOUT_FILES: Lazy<Mutex<HashSet<PathBuf>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-
-/// Class scanner responsible for finding and parsing class files
+/// Class scanner for finding and parsing class files
 #[derive(Debug)]
 pub struct ClassScanner {
     /// Configuration options for scanning
@@ -38,19 +35,26 @@ pub struct ClassScanner {
     
     /// Progress tracker for displaying progress
     progress_tracker: ProgressTracker,
+    
+    /// Tracks error files encountered during scanning
+    error_files: HashSet<PathBuf>,
+    
+    /// Tracks timeout files encountered during scanning
+    timeout_files: HashSet<PathBuf>,
 }
 
 impl ClassScanner {
-    /// Create a new class scanner with the given options and output directory
+    /// Create a new class scanner with the given options
     pub fn new(options: ClassScanOptions, output_dir: impl AsRef<Path>) -> Self {
-        let output_dir = output_dir.as_ref().to_path_buf();
-        
+        let output_path = output_dir.as_ref().to_path_buf();
         Self {
             options: options.clone(),
-            output_dir: output_dir.clone(),
+            output_dir: output_path.clone(),
             file_collector: FileCollector::new(),
-            parser: ClassParser::new(options, output_dir.clone()),
+            parser: ClassParser::new(options, output_path),
             progress_tracker: ProgressTracker::new(),
+            error_files: HashSet::new(),
+            timeout_files: HashSet::new(),
         }
     }
     
@@ -59,103 +63,75 @@ impl ClassScanner {
         Self::new(ClassScanOptions::default(), output_dir)
     }
     
-    /// Collect all .cpp and .hpp files from the input directory
+    /// Collect files from a directory
     pub fn collect_files(&self, input_dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
         self.file_collector.collect_files(input_dir)
     }
     
-    /// Parse a single file and return the classes found in it
+    /// Parse a single file and return the blocks
     pub fn parse_file(&self, file: impl AsRef<Path>) -> Result<Vec<Block>> {
         self.parser.parse_file(file)
     }
     
-    /// Parse a single file with a timeout and return the classes found in it
+    /// Parse a file with timeout
     pub fn parse_file_with_timeout(&self, file: impl AsRef<Path>) -> Result<(Vec<Block>, bool)> {
         self.parser.parse_file_with_timeout(file, self.options.parse_timeout_seconds)
     }
     
-    /// Scan files in parallel and return the classes found in each file
-    pub fn scan_files_parallel(&self, files: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<Block>)>> {
-        // Clear the error and timeout files
-        if let Ok(mut error_files) = ERROR_FILES.lock() {
-            error_files.clear();
-        }
-        if let Ok(mut timeout_files) = TIMEOUT_FILES.lock() {
-            timeout_files.clear();
-        }
+    /// Scan files in parallel and return the results
+    pub fn scan_files_parallel(&mut self, files: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<Block>)>> {
+        // Create a thread pool for parallel processing
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.options.parallel_threads.unwrap_or_else(num_cpus::get))
+            .build()?;
+            
+        // Thread-safe vector for collecting results
+        let results = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let error_files = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         
-        // Create output directory if it doesn't exist
-        std::fs::create_dir_all(&self.output_dir)
-            .context("Failed to create output directory")?;
-        
-        // Limit the number of files if specified
-        let files = if let Some(max_files) = self.options.max_files {
-            debug!("Limiting to {} files", max_files);
-            files.iter().take(max_files).cloned().collect::<Vec<_>>()
-        } else {
-            files.to_vec()
-        };
-        
-        // Configure thread pool if specified
-        if let Some(threads) = self.options.parallel_threads {
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build_global()
-                .unwrap_or_else(|e| warn!("Failed to configure thread pool: {}", e));
-        }
-        
-        // Process files in parallel with progress tracking
-        let results = self.progress_tracker.track_parallel_progress(
-            &files,
-            |file| {
-                // Parse the file with timeout
-                match self.parse_file_with_timeout(file) {
-                    Ok((classes, _timed_out)) => {
-                        if !classes.is_empty() {
-                            Some((file.clone(), classes))
-                        } else {
-                            None
-                        }
+        // Process files in parallel
+        pool.install(|| {
+            files.par_iter().for_each(|file_path| {
+                match self.parser.parse_file(file_path) {
+                    Ok(blocks) => {
+                        results.lock().unwrap().push((file_path.clone(), blocks));
                     }
-                    Err(_) => None,
+                    Err(err) => {
+                        warn!("Failed to parse file {}: {}", file_path.display(), err);
+                        error_files.lock().unwrap().push(file_path.clone());
+                    }
                 }
-            }
-        );
+            });
+        });
         
-        // Log timeout files if any
-        if let Ok(timeout_files) = TIMEOUT_FILES.lock() {
-            if !timeout_files.is_empty() {
-                warn!("Found {} files that timed out during parsing", timeout_files.len());
-                // Convert HashSet to Vec for the log_timeout_files method
-                let timeout_vec: Vec<PathBuf> = timeout_files.iter().cloned().collect();
-                self.parser.log_timeout_files(&timeout_vec, &self.output_dir);
-            }
+        // Update our error files
+        for error_file in error_files.lock().unwrap().iter() {
+            self.error_files.insert(error_file.clone());
         }
         
-        Ok(results)
-    }
-    
-    /// Get the list of files that failed to parse
-    pub fn get_error_files() -> Vec<PathBuf> {
-        ERROR_FILES.lock().map(|files| files.iter().cloned().collect()).unwrap_or_default()
-    }
-    
-    /// Get the list of files that timed out during parsing
-    pub fn get_timeout_files() -> Vec<PathBuf> {
-        TIMEOUT_FILES.lock().map(|files| files.iter().cloned().collect()).unwrap_or_default()
+        // Extract results from the thread-safe container
+        let scanned_files = results.lock().unwrap().clone();
+        
+        Ok(scanned_files)
     }
     
     /// Add a file to the error files list
-    pub fn add_error_file(file: impl AsRef<Path>) {
-        if let Ok(mut error_files) = ERROR_FILES.lock() {
-            error_files.insert(file.as_ref().to_path_buf());
-        }
+    pub fn add_error_file(&mut self, file: impl AsRef<Path>) {
+        let file_path = file.as_ref().to_path_buf();
+        self.error_files.insert(file_path);
     }
     
     /// Add a file to the timeout files list
-    pub fn add_timeout_file(file: impl AsRef<Path>) {
-        if let Ok(mut timeout_files) = TIMEOUT_FILES.lock() {
-            timeout_files.insert(file.as_ref().to_path_buf());
+    pub fn add_timeout_file(&mut self, file: impl AsRef<Path>) {
+        let file_path = file.as_ref().to_path_buf();
+        self.timeout_files.insert(file_path);
+    }
+    
+    /// Get the errors encountered during scanning
+    pub fn get_scan_errors(&self) -> ScanErrors {
+        ScanErrors {
+            error_files: self.error_files.iter().cloned().collect(),
+            timeout_files: self.timeout_files.iter().cloned().collect(),
         }
     }
 } 

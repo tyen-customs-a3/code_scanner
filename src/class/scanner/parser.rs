@@ -1,16 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::fs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::thread;
-use std::sync::mpsc;
-use std::io::Write;
 
 use anyhow::{Result, Context, anyhow};
-use cpp_parser::Block;
 use log::{debug, warn, error, trace};
 
 use crate::class::types::ClassScanOptions;
-use super::ClassScanner;
+use crate::utils::file_utils;
+use super::simple_parser::{SimpleParser, Block};
 
 /// Class parser for parsing class files
 #[derive(Debug)]
@@ -20,157 +17,127 @@ pub struct ClassParser {
     
     /// Output directory for logs and temporary files
     output_dir: PathBuf,
+    
+    /// Simple parser for actual parsing
+    simple_parser: SimpleParser,
 }
 
 impl ClassParser {
-    /// Create a new class parser with the given options and output directory
+    /// Create a new class parser with the given options
     pub fn new(options: ClassScanOptions, output_dir: impl AsRef<Path>) -> Self {
         Self {
-            options,
+            options: options.clone(),
             output_dir: output_dir.as_ref().to_path_buf(),
+            simple_parser: SimpleParser::new(options.verbose_errors),
         }
     }
     
-    /// Parse a file and return the parsed classes
+    /// Parse a file and return the blocks found in it
     pub fn parse_file(&self, file: impl AsRef<Path>) -> Result<Vec<Block>> {
         let file_path = file.as_ref();
         debug!("Parsing file: {}", file_path.display());
         
-        // Read file content
-        let content = fs::read_to_string(file_path)
-            .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+        // Read the file content using file_utils
+        let content = file_utils::read_file_to_string(file_path)?;
         
-        // Use optimized parser if enabled in options
-        let classes = if self.options.use_optimized_parser {
-            debug!("Using optimized parallel parser for {}", file_path.display());
-            cpp_parser::optimized::parse_classes_parallel(&content)
-        } else {
-            debug!("Using standard parser for {}", file_path.display());
-            cpp_parser::parse_classes(&content)
-        };
+        // Parse using the simple parser and convert to Block type
+        let class_blocks = self.simple_parser.parse_content(content, file_path)?;
+        let blocks = self.simple_parser.to_blocks(class_blocks);
         
-        debug!("Found {} classes in {}", classes.len(), file_path.display());
-        Ok(classes)
+        Ok(blocks)
     }
     
-    /// Parse a single file with a timeout and return the classes found in it
+    /// Parse a file with a timeout and return the blocks found in it
     pub fn parse_file_with_timeout(&self, file: impl AsRef<Path>, timeout_seconds: u64) -> Result<(Vec<Block>, bool)> {
-        let file = file.as_ref();
-        debug!("Processing file with timeout: {}", file.display());
+        let file_path = file.as_ref();
+        let timeout = Duration::from_secs(timeout_seconds);
         
-        // Create a channel to communicate between threads
-        let (sender, receiver) = mpsc::channel();
-        let file_path = file.to_path_buf();
-        let output_dir = self.output_dir.clone();
-        let verbose_errors = self.options.verbose_errors;
-        let use_optimized_parser = self.options.use_optimized_parser;
+        debug!("Parsing file with timeout: {} ({} seconds)", file_path.display(), timeout_seconds);
         
-        // Spawn a thread to parse the file
-        let parse_thread = thread::spawn(move || {
-            // Create a new parser for this thread
-            let parser = ClassParser::new(
-                ClassScanOptions {
-                    verbose_errors,
-                    use_optimized_parser,
-                    ..ClassScanOptions::default()
-                },
-                output_dir
-            );
-            
-            // Parse the file
-            let result = parser.parse_file(&file_path);
-            
-            // Send the result back to the main thread
-            let _ = sender.send(result);
-        });
+        // Start timer
+        let start_time = Instant::now();
         
-        // Wait for the thread to complete or timeout
-        let timeout_duration = Duration::from_secs(timeout_seconds);
-        let result = match receiver.recv_timeout(timeout_duration) {
-            Ok(result) => {
-                // Thread completed within timeout
-                let classes = result?;
-                Ok((classes, false))
-            }
-            Err(_) => {
-                // Timeout occurred
-                warn!("Timeout parsing file: {}", file.display());
-                
-                // Add to timeout files
-                ClassScanner::add_timeout_file(file);
-                
-                // Return empty classes with timeout flag
-                Ok((Vec::new(), true))
+        // Read file content using file_utils
+        let content = match file_utils::read_file_to_string(file_path) {
+            Ok(content) => content,
+            Err(e) => {
+                warn!("Failed to read file {}: {}", file_path.display(), e);
+                return Err(anyhow!("Failed to read file: {}", e));
             }
         };
         
-        // Ensure the thread is properly cleaned up
-        let _ = parse_thread.join();
+        // Parse content
+        let parse_result = self.simple_parser.parse_content(content, file_path);
         
-        result
-    }
-    
-    /// Helper function to log parse errors to a file
-    pub fn log_parse_error(&self, file: &Path, error: &impl std::fmt::Display, content: &str) {
-        if let Some(error_location) = error.to_string().find("line") {
-            let error_info = &error.to_string()[error_location..];
-            
-            // Create a thread-safe error log file
-            let error_file_name = format!(
-                "parse_error_{}.log",
-                file.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .replace(|c: char| !c.is_alphanumeric(), "_")
-            );
-            
-            let error_file_path = self.output_dir.join(error_file_name);
-            
-            // Use a more robust approach to write the error file
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&error_file_path)
-            {
-                Ok(mut file_handle) => {
-                    let _ = writeln!(file_handle, "Error parsing file: {}", file.display());
-                    let _ = writeln!(file_handle, "Error details: {}", error);
-                    let _ = writeln!(file_handle, "Location: {}", error_info);
-                    let _ = writeln!(file_handle, "\nFile content:\n{}", content);
-                    debug!("Wrote detailed error information to {}", error_file_path.display());
-                }
-                Err(write_err) => {
-                    error!("Failed to write error log file: {}", write_err);
-                }
+        // Check for timeout
+        let elapsed = start_time.elapsed();
+        let timed_out = elapsed > timeout;
+        
+        if timed_out {
+            warn!("Parsing timed out for file: {} ({}s)", file_path.display(), elapsed.as_secs());
+            return Ok((Vec::new(), true));
+        }
+        
+        // Handle parse result
+        match parse_result {
+            Ok(class_blocks) => {
+                let blocks = self.simple_parser.to_blocks(class_blocks);
+                Ok((blocks, false))
+            }
+            Err(e) => {
+                warn!("Failed to parse file {}: {}", file_path.display(), e);
+                Err(anyhow!("Failed to parse file: {}", e))
             }
         }
     }
     
-    /// Helper function to log timeout files to a file
+    /// Log error details for a file
+    pub fn log_parse_error(&self, file: &Path, error: &impl std::fmt::Display, content: &str) {
+        if !self.options.verbose_errors {
+            return;
+        }
+        
+        let file_name = file.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+            
+        let error_dir = self.output_dir.join("error_logs");
+        file_utils::ensure_dir_exists(&error_dir).unwrap_or_else(|_| {
+            warn!("Failed to create error log directory: {}", error_dir.display());
+        });
+        
+        let error_file = error_dir.join(format!("{}_error.log", file_name));
+        let error_content = format!("Error parsing file: {}\n\nError: {}\n\nContent:\n{}", 
+            file.display(), error, content);
+            
+        file_utils::write_string_to_file(&error_file, &error_content).unwrap_or_else(|_| {
+            warn!("Failed to write error log to: {}", error_file.display());
+        });
+        
+        debug!("Wrote error log to: {}", error_file.display());
+    }
+    
+    /// Log timeout files
     pub fn log_timeout_files(&self, timeout_files: &[PathBuf], output_dir: &Path) {
         if timeout_files.is_empty() {
             return;
         }
         
-        let timeout_log_path = output_dir.join("timeout_files.log");
+        let timeout_dir = output_dir.join("timeout_logs");
+        file_utils::ensure_dir_exists(&timeout_dir).unwrap_or_else(|_| {
+            warn!("Failed to create timeout log directory: {}", timeout_dir.display());
+        });
         
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&timeout_log_path)
-        {
-            Ok(mut file_handle) => {
-                let _ = writeln!(file_handle, "Files that timed out during parsing:");
-                for file in timeout_files {
-                    let _ = writeln!(file_handle, "{}", file.display());
-                }
-                debug!("Wrote timeout files list to {}", timeout_log_path.display());
-            }
-            Err(write_err) => {
-                error!("Failed to write timeout log file: {}", write_err);
-            }
-        }
+        let timeout_file = timeout_dir.join("timeout_files.log");
+        let timeout_content = timeout_files.iter()
+            .map(|f| f.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+            
+        file_utils::write_string_to_file(&timeout_file, &timeout_content).unwrap_or_else(|_| {
+            warn!("Failed to write timeout log to: {}", timeout_file.display());
+        });
+        
+        debug!("Wrote {} timeout files to: {}", timeout_files.len(), timeout_file.display());
     }
 } 

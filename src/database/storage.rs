@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::fs;
 use anyhow::{Result, Context};
 use log::{info, debug};
 
+use crate::utils::file_utils;
 use super::types::ClassDatabase;
 
 /// Database storage operations
@@ -30,8 +30,7 @@ impl DatabaseStorage {
             return Ok(ClassDatabase::default());
         }
         
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read database file {}", path.display()))?;
+        let content = file_utils::read_file_to_string(path)?;
         
         let db: ClassDatabase = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse database file {}", path.display()))?;
@@ -45,17 +44,15 @@ impl DatabaseStorage {
         let path = &self.db_path;
         debug!("Saving database to {}", path.display());
         
-        // Create parent directory if it doesn't exist
+        // Create parent directory if needed using file_utils
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+            file_utils::ensure_dir_exists(parent)?;
         }
         
         let content = serde_json::to_string_pretty(db)
             .context("Failed to serialize database")?;
         
-        fs::write(path, content)
-            .with_context(|| format!("Failed to write database file {}", path.display()))?;
+        file_utils::write_string_to_file(path, &content)?;
         
         info!("Saved database with {} classes", db.entries.len());
         Ok(())
